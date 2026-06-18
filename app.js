@@ -291,18 +291,31 @@ const Waiting = {
     },
     checkNotifyTimeout() {
         const cfg = Pricing.getConfig(); const tms = (cfg.notifyTimeoutMinutes || 10) * 60000; const now = Date.now();
-        const waiting = this.getAll(); const timed = [];
+        const waiting = this.getAll(); const timed = []; const rooms = Rooms.getAll();
         for (const e of waiting) { if (e.status === 'notified' && e.notifiedAt && (now - new Date(e.notifiedAt).getTime() > tms)) timed.push(e); }
         for (const e of timed) {
             const rid = e.notifiedRoomId; const rn = rid ? (Rooms.getById(rid)?.name || '') : '';
-            if (rid) Rooms.clearNotifiedWaiting(rid);
+            if (rid) {
+                const r = rooms.find(x => x.id === rid);
+                if (r && r.status === 'notified' && r.notifiedWaitingId === e.id) { delete r.notifiedWaitingId; r.status = 'available'; Storage.set(Storage.KEYS.ROOMS, rooms); }
+            }
             e.status = 'waiting'; e.notifiedRoomId = null; e.notifiedAt = null;
-            this.addHistory(e, 'notify_timeout', `通知超时未确认，释放包间「${rn}」`);
-            App.toast(`候补通知超时：${e.customerName} 在包间「${rn}」未确认，已释放`, 'warning');
-            if (rid) Waiting.tryFillRoom(rid);
+            this.addHistory(e, 'notify_timeout', `通知超时未确认，释放包间「${rn}」，自动退回队列`);
+            App.toast(`候补通知超时：${e.customerName} 在包间「${rn}」未确认，已释放，下一位可继续补位`, 'warning');
+            if (rid) {
+                Storage.set(Storage.KEYS.WAITING, waiting);
+                setTimeout(() => { const next = Waiting.tryFillRoom(rid); if (next) App.refreshAll(); }, 200);
+                continue;
+            }
         }
         if (timed.length) Storage.set(Storage.KEYS.WAITING, waiting);
         return timed;
+    },
+    getShiftTag(hour) {
+        if (hour >= 6 && hour < 12) return { key: 'morning', label: '早班 (6:00-12:00)' };
+        if (hour >= 12 && hour < 18) return { key: 'afternoon', label: '午班 (12:00-18:00)' };
+        if (hour >= 18 && hour < 24) return { key: 'night', label: '晚班 (18:00-24:00)' };
+        return { key: 'late-night', label: '夜班 (0:00-6:00)' };
     }
 };
 
@@ -322,7 +335,7 @@ const UI = {
 };
 
 const App = {
-    currentTab: 'dashboard', refreshInterval: null, tempAddons: {},
+    currentTab: 'dashboard', refreshInterval: null, tempAddons: {}, _shiftSummaries: [],
     init() { Storage.init(); Waiting.migrateQueueNumbers(); Waiting.reconcileRoomStates(); this.bindTabs(); this.startClock(); this.startAutoRefresh(); this.refreshAll(); this.renderBillDateFilter(); },
     bindTabs() { document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => this.switchTab(b.dataset.tab))); },
     switchTab(tab) { this.currentTab = tab; document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab)); document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === tab)); this.refreshAll(); },
@@ -336,7 +349,51 @@ const App = {
         const e2 = document.getElementById('statAvailable'); if (e2) e2.textContent = rooms.filter(r => r.status === 'available').length;
         const e3 = document.getElementById('statWaiting'); if (e3) e3.textContent = Waiting.getActive().length;
         const e4 = document.getElementById('statRevenue'); if (e4) e4.textContent = Bills.getTodayRevenue().toFixed(2);
-        this.renderRoomsGrid(); this.renderActiveOrdersTable();
+        this.renderRoomsGrid(); this.renderActiveOrdersTable(); this.renderTimeline();
+    },
+    renderTimeline() {
+        const hoursEl = document.getElementById('timelineHours'); const bodyEl = document.getElementById('timelineBody');
+        if (!hoursEl || !bodyEl) return;
+        let hHtml = '';
+        for (let h = 0; h < 24; h++) { hHtml += `<div class="timeline-hour-label ${h === 0 ? 'first' : ''}">${h.toString().padStart(2, '0')}:00</div>`; }
+        hoursEl.innerHTML = hHtml;
+        const today = new Date(); const dayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+        const dayEnd = dayStart + 24 * 3600 * 1000; const totalMs = dayEnd - dayStart;
+        const allOrders = Orders.getAll().concat(Bills.getAll().map(b => ({ id: b.orderId, roomId: b.roomId, customerName: b.customerName, startTime: b.startTime, endTime: b.endTime, status: 'completed', reservedAt: null })));
+        const allWaiting = Waiting.getAll().filter(w => w.status === 'notified' && w.notifiedRoomId);
+        const rooms = Rooms.getAll(); let bHtml = '';
+        for (const room of rooms) {
+            const segments = [];
+            for (const o of allOrders.filter(x => x.roomId === room.id)) {
+                const st = Math.max(dayStart, new Date(o.startTime).getTime());
+                const en = Math.min(dayEnd, o.endTime ? new Date(o.endTime).getTime() : (o.status === 'completed' ? st + 3600000 : Date.now()));
+                if (en > st) segments.push({ type: o.status === 'reserved' ? 'reserved' : 'occupied', start: st, end: en, label: `${o.customerName}`, orderId: o.id });
+            }
+            for (const w of allWaiting.filter(x => x.notifiedRoomId === room.id)) {
+                const st = Math.max(dayStart, new Date(w.notifiedAt).getTime());
+                const en = Math.min(dayEnd, st + 30 * 60000);
+                if (en > st) segments.push({ type: 'notified', start: st, end: en, label: `#${w.globalQueueNumber} ${w.customerName}`, waitingId: w.id });
+            }
+            segments.sort((a, b) => a.start - b.start);
+            let trackHtml = '';
+            for (const seg of segments) {
+                const left = ((seg.start - dayStart) / totalMs) * 100;
+                const width = Math.max(2, ((seg.end - seg.start) / totalMs) * 100);
+                const click = seg.type === 'notified' ? `App.showNotifiedDetailModal('${room.id}','${seg.waitingId}')` : `App.showBillOrOrder('${seg.orderId}')`;
+                trackHtml += `<div class="timeline-block ${seg.type}" style="left:${left}%;width:${width}%;" onclick="${click}" title="${seg.label} ${new Date(seg.start).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}~${new Date(seg.end).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}">${seg.label}</div>`;
+            }
+            bHtml += `<div class="timeline-row"><div class="timeline-room-label">${room.code} ${room.name}</div><div class="timeline-track">${trackHtml}</div></div>`;
+        }
+        bodyEl.innerHTML = bHtml;
+    },
+    showBillOrOrder(id) {
+        const bill = Bills.getAll().find(b => b.orderId === id);
+        if (bill) { this.showBillDetailModal(bill.id); return; }
+        const order = Orders.getAll().find(o => o.id === id);
+        if (order) {
+            if (order.status === 'reserved') this.showReservedModal(order.id);
+            else this.showOrderDetailModal(order.id);
+        }
     },
     renderRoomsGrid() {
         const grid = document.getElementById('roomsGrid'); if (!grid) return;
@@ -389,19 +446,32 @@ const App = {
         if (!bills.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">暂无账单数据</td></tr>'; return; }
         tbody.innerHTML = bills.map(b => `<tr><td><strong>${b.id}</strong></td><td>${b.roomName}</td><td>${b.customerName}</td><td>${UI.formatDateTime(b.startTime)}</td><td>${UI.formatDateTime(b.endTime)}</td><td>${UI.formatDuration(b.durationMinutes)}</td><td>${UI.formatMoney(b.roomFee)}</td><td>${UI.formatMoney(b.addonsTotal)}</td><td><strong>${UI.formatMoney(b.total)}</strong></td><td><button class="btn btn-sm btn-secondary" onclick="App.showBillDetailModal('${b.id}')">详情</button></td></tr>`).join('');
     },
-    filterBills() { this.refreshBillsTable(); },
+    filterBills() { this.refreshBillsTable(); const v = document.getElementById('billViewSwitch')?.value; if (v === 'shift') this.renderShiftSummary(); },
     renderWaitingRoomFilter() {
-        const sel = document.getElementById('wfRoom'); if (!sel) return;
-        const cur = sel.value; sel.innerHTML = '<option value="">全部包间</option>' + Rooms.getAll().map(r => `<option value="${r.id}">${r.code} ${r.name}</option>`).join(''); sel.value = cur;
+        const modeSel = document.getElementById('wfRoomMode'); const roomSel = document.getElementById('wfRoom');
+        if (roomSel) { const cur = roomSel.value; roomSel.innerHTML = '<option value="">全部包间</option>' + Rooms.getAll().map(r => `<option value="${r.id}">${r.code} ${r.name}</option>`).join(''); roomSel.value = cur; }
+        if (modeSel && roomSel) { roomSel.style.display = modeSel.value === 'custom' ? '' : 'none'; }
+        const smartSel = document.getElementById('smartRoomSelect'); if (smartSel) { const cur = smartSel.value; smartSel.innerHTML = '<option value="">请选择包间</option>' + Rooms.getAll().map(r => `<option value="${r.id}">${r.code} ${r.name} (${r.capacity}人)</option>`).join(''); smartSel.value = cur; }
     },
-    resetWaitingFilters() { const s = document.getElementById('wfRoom'); if (s) s.value = ''; const st = document.getElementById('wfStatus'); if (st) st.value = ''; const mn = document.getElementById('wfPeopleMin'); if (mn) mn.value = ''; const mx = document.getElementById('wfPeopleMax'); if (mx) mx.value = ''; this.refreshWaitingTable(); },
+    switchWaitingSubTab(tab) {
+        document.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.subtab === tab));
+        const lv = document.getElementById('waitingListView'); const sv = document.getElementById('waitingSmartView');
+        if (lv) lv.style.display = tab === 'list' ? '' : 'none';
+        if (sv) sv.style.display = tab === 'smart' ? '' : 'none';
+        if (tab === 'smart') { this.renderWaitingRoomFilter(); this.refreshSmartRecommend(); }
+    },
+    resetWaitingFilters() { const m = document.getElementById('wfRoomMode'); if (m) m.value = ''; const s = document.getElementById('wfRoom'); if (s) s.value = ''; const st = document.getElementById('wfStatus'); if (st) st.value = ''; const mn = document.getElementById('wfPeopleMin'); if (mn) mn.value = ''; const mx = document.getElementById('wfPeopleMax'); if (mx) mx.value = ''; this.renderWaitingRoomFilter(); this.refreshWaitingTable(); },
     refreshWaitingTable() {
         const tbody = document.querySelector('#waitingTable tbody'); if (!tbody) return;
         this.renderWaitingRoomFilter();
         let waiting = Waiting.getAll().sort((a, b) => a.globalQueueNumber - b.globalQueueNumber);
+        const mode = document.getElementById('wfRoomMode')?.value || '';
         const rf = document.getElementById('wfRoom')?.value; const sf = document.getElementById('wfStatus')?.value;
         const pmin = parseInt(document.getElementById('wfPeopleMin')?.value) || 0; const pmax = parseInt(document.getElementById('wfPeopleMax')?.value) || 999;
-        if (rf) waiting = waiting.filter(w => w.preferredRoomId === rf || w.notifiedRoomId === rf || !w.preferredRoomId);
+        if (mode === 'any') waiting = waiting.filter(w => !w.preferredRoomId);
+        else if (mode === 'specific') waiting = waiting.filter(w => !!w.preferredRoomId);
+        else if (mode === 'custom' && rf) waiting = waiting.filter(w => w.preferredRoomId === rf || w.notifiedRoomId === rf);
+        else if (rf) waiting = waiting.filter(w => w.preferredRoomId === rf || w.notifiedRoomId === rf || !w.preferredRoomId);
         if (sf) waiting = waiting.filter(w => w.status === sf);
         if (pmin > 0 || pmax < 999) waiting = waiting.filter(w => w.peopleCount >= pmin && w.peopleCount <= pmax);
         if (!waiting.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">暂无候补记录</td></tr>'; return; }
@@ -415,9 +485,67 @@ const App = {
             else if (w.status === 'seated') acts = '<span style="font-size:12px;color:#4caf50;">✓ 已完成</span>';
             else if (w.status === 'cancelled') acts = '<span style="font-size:12px;color:#999;">已结束</span>';
             const sc = w.status === 'waiting' ? 'reserved' : w.status === 'notified' ? 'notified' : 'available';
-            let rd = room ? room.name : '任意'; if (nr) rd = `<span style="color:#e65100;font-weight:600;">${nr.name} (待确认)</span>`;
+            let rd = room ? room.name : '<span style="color:#2196f3;">任意包间</span>'; if (nr) rd = `<span style="color:#e65100;font-weight:600;">${nr.name} (待确认)</span>`;
             return `<tr><td><strong>#${w.globalQueueNumber}</strong></td><td>${w.customerName}</td><td>${w.phone}</td><td>${w.peopleCount}人</td><td>${rd}</td><td>${UI.formatDateTime(w.createdAt)}</td><td><span class="room-status ${sc}">${UI.getStatusLabel(w.status)}</span></td><td>${UI.renderHistoryTimeline(w.history)}</td><td>${acts}</td></tr>`;
         }).join('');
+    },
+    refreshSmartRecommend() {
+        const area = document.getElementById('smartRecommendArea'); const sel = document.getElementById('smartRoomSelect');
+        if (!area) return; const rid = sel?.value;
+        if (!rid) { area.innerHTML = '<div style="padding:40px;text-align:center;color:#999;">请先在上方选择一个包间</div>'; return; }
+        const room = Rooms.getById(rid); if (!room) return;
+        const actives = Waiting.getActive(); const now = Date.now();
+        const scored = actives.map(w => {
+            let score = 0; const reasons = [];
+            const waitMin = Math.round((now - new Date(w.createdAt).getTime()) / 60000);
+            if (w.preferredRoomId === rid) { score += 100; reasons.push(`期望包间 = ${room.name}`); }
+            else if (!w.preferredRoomId) { score += 60; reasons.push('接受任意包间'); }
+            else { score += 10; reasons.push(`期望其他包间`); }
+            if (w.peopleCount <= room.capacity) {
+                const fit = 1 - (w.peopleCount / room.capacity);
+                score += (1 - Math.abs(fit - 0.2)) * 40;
+                reasons.push(`人数 ${w.peopleCount}/${room.capacity} 合适`);
+            } else {
+                score -= 200; reasons.push(`⚠ 人数超容量`);
+            }
+            const waitScore = Math.min(50, waitMin / 3);
+            score += waitScore;
+            if (waitMin >= 30) reasons.push(`已等 ${waitMin} 分钟（较久）`);
+            return { ...w, score, reasons, waitMin };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        if (!scored.length) { area.innerHTML = '<div style="padding:40px;text-align:center;color:#999;">暂无等待中的候补客人</div>'; return; }
+        const cfg = Pricing.getConfig();
+        area.innerHTML = `<table class="data-table"><thead><tr><th>推荐度</th><th>排队号</th><th>客人</th><th>电话</th><th>人数</th><th>期望</th><th>已等待</th><th>登记时间</th><th>匹配说明</th><th>操作</th></tr></thead><tbody>` + scored.map(w => {
+            const lv = w.score >= 120 ? 'high' : w.score >= 80 ? 'medium' : '';
+            const pref = w.preferredRoomId ? (Rooms.getById(w.preferredRoomId)?.name || '') : '<span style="color:#2196f3;">任意</span>';
+            return `<tr><td><span class="smart-score ${lv}">${Math.max(0, Math.round(w.score))} 分</span></td><td><strong>#${w.globalQueueNumber}</strong></td><td>${w.customerName}</td><td>${w.phone}</td><td>${w.peopleCount}人</td><td>${pref}</td><td>${w.waitMin}分钟</td><td>${UI.formatDateTime(w.createdAt)}</td><td><div class="smart-reason">${w.reasons.join('，')}</div></td><td><button class="btn btn-sm btn-warning" onclick="App.smartNotify('${w.id}','${rid}')">立即通知</button></td></tr>`;
+        }).join('') + `</tbody></table>`;
+    },
+    smartNotify(wid, rid) { const res = Waiting.manualNotify(wid, rid); if (res.success) { const e = Waiting.getAll().find(w => w.id === wid); const r = Rooms.getById(rid); this.toast(`已智能通知 #${e?.globalQueueNumber} ${e?.customerName} 入住 ${r?.name}`, 'success'); this.refreshAll(); } else { this.toast(res.reason, 'error'); } },
+    switchBillView() { const v = document.getElementById('billViewSwitch')?.value || 'list'; const lv = document.getElementById('billListView'); const sv = document.getElementById('billShiftView'); if (lv) lv.style.display = v === 'list' ? '' : 'none'; if (sv) sv.style.display = v === 'shift' ? '' : 'none'; if (v === 'shift') this.renderShiftSummary(); },
+    renderShiftSummary() {
+        const tbody = document.querySelector('#shiftSummaryTable tbody'); if (!tbody) return;
+        let bills = Bills.getAll(); const df = document.getElementById('billDateFilter')?.value;
+        if (df) bills = bills.filter(b => new Date(b.createdAt).toISOString().split('T')[0] === df);
+        const groups = {};
+        for (const b of bills) {
+            const d = new Date(b.createdAt); const dateStr = d.toISOString().split('T')[0]; const shift = Waiting.getShiftTag(d.getHours());
+            const key = `${dateStr}|${shift.key}`; if (!groups[key]) groups[key] = { date: dateStr, shiftKey: shift.key, shiftLabel: shift.label, count: 0, roomFee: 0, addons: 0, total: 0, billIds: [] };
+            groups[key].count++; groups[key].roomFee += b.roomFee; groups[key].addons += b.addonsTotal; groups[key].total += b.total; groups[key].billIds.push(b.id);
+        }
+        const arr = Object.values(groups).sort((a, b) => b.date.localeCompare(a.date) || ['morning','afternoon','night','late-night'].indexOf(a.shiftKey) - ['morning','afternoon','night','late-night'].indexOf(b.shiftKey));
+        this._shiftSummaries = arr;
+        if (!arr.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无汇总数据</td></tr>'; return; }
+        tbody.innerHTML = arr.map((g, idx) => `<tr><td>${g.date}</td><td><span class="shift-tag ${g.shiftKey}">${g.shiftLabel}</span></td><td><strong>${g.count}</strong></td><td>${UI.formatMoney(g.roomFee)}</td><td>${UI.formatMoney(g.addons)}</td><td><strong style="color:#e91e63;font-size:15px;">${UI.formatMoney(g.total)}</strong></td><td><button class="btn btn-sm btn-secondary" onclick="App.showShiftDetail(${idx})">查看明细</button></td></tr>`).join('');
+    },
+    showShiftDetail(idx) {
+        const g = this._shiftSummaries[idx]; if (!g) return;
+        const billIds = g.billIds;
+        const bills = billIds.map(id => Bills.getById(id)).filter(Boolean); if (!bills.length) return;
+        const rows = bills.map(b => `<tr onclick="App.closeModal();App.showBillDetailModal('${b.id}')" style="cursor:pointer;"><td><strong>${b.id}</strong></td><td>${b.roomName}</td><td>${b.customerName}</td><td>${UI.formatDateTime(b.endTime)}</td><td>${UI.formatDuration(b.durationMinutes)}</td><td>${UI.formatMoney(b.roomFee)}</td><td>${UI.formatMoney(b.addonsTotal)}</td><td><strong>${UI.formatMoney(b.total)}</strong></td></tr>`).join('');
+        const totR = bills.reduce((s, b) => s + b.roomFee, 0); const totA = bills.reduce((s, b) => s + b.addonsTotal, 0); const totT = bills.reduce((s, b) => s + b.total, 0);
+        this.openModal(`<div class="modal-header"><h3>交接班账单明细（共 ${bills.length} 笔）</h3><button class="modal-close" onclick="App.closeModal()">×</button></div><div class="modal-body" style="max-height:60vh;overflow:auto;"><table class="data-table" style="width:100%;font-size:13px;"><thead><tr><th>账单号</th><th>包间</th><th>客人</th><th>结账时间</th><th>时长</th><th>台费</th><th>加购</th><th>合计</th></tr></thead><tbody>${rows}</tbody></table></div><div class="modal-body" style="padding-top:0;"><div class="breakdown-total"><span>台费合计</span><span>${UI.formatMoney(totR)}</span></div><div class="breakdown-total" style="border:none;margin-top:0;"><span>加购合计</span><span>${UI.formatMoney(totA)}</span></div><div class="breakdown-total" style="margin-top:8px;"><span>总收入</span><span style="color:#e91e63;font-size:18px;">${UI.formatMoney(totT)}</span></div></div><div class="modal-footer"><button class="btn btn-secondary" onclick="App.closeModal()">关闭</button></div>`);
     },
     openModal(html) { document.getElementById('modalContent').innerHTML = html; document.getElementById('modalContainer').classList.add('active'); },
     closeModal() { document.getElementById('modalContainer').classList.remove('active'); },

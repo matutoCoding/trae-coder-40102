@@ -48,6 +48,14 @@
                 <div class="rooms-grid" id="roomsGrid"></div>
 
                 <div class="section-title">
+                    <h3>今日房态时间轴</h3>
+                </div>
+                <div class="timeline-container">
+                    <div class="timeline-hours" id="timelineHours"></div>
+                    <div class="timeline-body" id="timelineBody"></div>
+                </div>
+
+                <div class="section-title">
                     <h3>进行中的订单</h3>
                 </div>
                 <div class="table-container">
@@ -161,28 +169,57 @@
                 <div class="section-header">
                     <h2>账单记录</h2>
                     <div class="filter-group">
+                        <select id="billViewSwitch" class="form-input" onchange="App.switchBillView()">
+                            <option value="list">明细列表</option>
+                            <option value="shift">交接班汇总</option>
+                        </select>
                         <input type="date" id="billDateFilter" class="form-input">
                         <button class="btn btn-secondary" onclick="App.filterBills()">筛选</button>
                     </div>
                 </div>
-                <div class="table-container">
-                    <table class="data-table" id="billsTable">
-                        <thead>
-                            <tr>
-                                <th>账单号</th>
-                                <th>包间</th>
-                                <th>客人</th>
-                                <th>开始时间</th>
-                                <th>结束时间</th>
-                                <th>时长</th>
-                                <th>台费</th>
-                                <th>加购</th>
-                                <th>合计</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+                <div id="billListView">
+                    <div class="table-container">
+                        <table class="data-table" id="billsTable">
+                            <thead>
+                                <tr>
+                                    <th>账单号</th>
+                                    <th>包间</th>
+                                    <th>客人</th>
+                                    <th>开始时间</th>
+                                    <th>结束时间</th>
+                                    <th>时长</th>
+                                    <th>台费</th>
+                                    <th>加购</th>
+                                    <th>合计</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div id="billShiftView" style="display:none;">
+                    <div class="pricing-section">
+                        <div class="section-subtitle">
+                            <h3>交接班汇总</h3>
+                        </div>
+                        <div class="table-container">
+                            <table class="data-table" id="shiftSummaryTable">
+                                <thead>
+                                    <tr>
+                                        <th>日期</th>
+                                        <th>班次</th>
+                                        <th>订单数</th>
+                                        <th>台费合计</th>
+                                        <th>加购合计</th>
+                                        <th>总收入</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -190,43 +227,67 @@
                 <div class="section-header">
                     <h2>候补队列管理</h2>
                     <div class="filter-group">
+                        <div class="tab-switch">
+                            <button class="sub-tab-btn active" data-subtab="list" onclick="App.switchWaitingSubTab('list')">全部列表</button>
+                            <button class="sub-tab-btn" data-subtab="smart" onclick="App.switchWaitingSubTab('smart')">智能推荐</button>
+                        </div>
                         <button class="btn btn-primary" onclick="App.showWaitingModal()">+ 登记候补</button>
                         <button class="btn btn-warning" onclick="App.showManualNotifyModal()">手动通知</button>
                     </div>
                 </div>
-                <div class="waiting-filters">
-                    <select id="wfRoom" class="form-input" onchange="App.refreshWaitingTable()">
-                        <option value="">全部包间</option>
-                    </select>
-                    <select id="wfStatus" class="form-input" onchange="App.refreshWaitingTable()">
-                        <option value="">全部状态</option>
-                        <option value="waiting">等待中</option>
-                        <option value="notified">已通知</option>
-                        <option value="seated">已入座</option>
-                        <option value="cancelled">已取消</option>
-                    </select>
-                    <input type="number" id="wfPeopleMin" class="form-input" placeholder="最少人数" min="1" onchange="App.refreshWaitingTable()" style="width:100px;">
-                    <span style="color:#999;">~</span>
-                    <input type="number" id="wfPeopleMax" class="form-input" placeholder="最多人数" min="1" onchange="App.refreshWaitingTable()" style="width:100px;">
-                    <button class="btn btn-sm btn-secondary" onclick="App.resetWaitingFilters()">重置</button>
+                <div id="waitingListView">
+                    <div class="waiting-filters">
+                        <select id="wfRoomMode" class="form-input" onchange="App.refreshWaitingTable()">
+                            <option value="">包间筛选模式</option>
+                            <option value="any">只看任意包间</option>
+                            <option value="specific">只看指定包间</option>
+                            <option value="custom">指定某个包间</option>
+                        </select>
+                        <select id="wfRoom" class="form-input" onchange="App.refreshWaitingTable()" style="display:none;">
+                            <option value="">全部包间</option>
+                        </select>
+                        <select id="wfStatus" class="form-input" onchange="App.refreshWaitingTable()">
+                            <option value="">全部状态</option>
+                            <option value="waiting">等待中</option>
+                            <option value="notified">已通知</option>
+                            <option value="seated">已入座</option>
+                            <option value="cancelled">已取消</option>
+                        </select>
+                        <input type="number" id="wfPeopleMin" class="form-input" placeholder="最少人数" min="1" onchange="App.refreshWaitingTable()" style="width:100px;">
+                        <span style="color:#999;">~</span>
+                        <input type="number" id="wfPeopleMax" class="form-input" placeholder="最多人数" min="1" onchange="App.refreshWaitingTable()" style="width:100px;">
+                        <button class="btn btn-sm btn-secondary" onclick="App.resetWaitingFilters()">重置</button>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table" id="waitingTable">
+                            <thead>
+                                <tr>
+                                    <th>排队号</th>
+                                    <th>客人姓名</th>
+                                    <th>联系电话</th>
+                                    <th>人数</th>
+                                    <th>期望包间</th>
+                                    <th>登记时间</th>
+                                    <th>状态</th>
+                                    <th>操作日志</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
                 </div>
-                <div class="table-container">
-                    <table class="data-table" id="waitingTable">
-                        <thead>
-                            <tr>
-                                <th>排队号</th>
-                                <th>客人姓名</th>
-                                <th>联系电话</th>
-                                <th>人数</th>
-                                <th>期望包间</th>
-                                <th>登记时间</th>
-                                <th>状态</th>
-                                <th>操作日志</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
+                <div id="waitingSmartView" style="display:none;">
+                    <div class="waiting-filters">
+                        <label style="font-weight:600;font-size:13px;color:#555;">选择刚空出的包间：</label>
+                        <select id="smartRoomSelect" class="form-input" onchange="App.refreshSmartRecommend()">
+                            <option value="">请选择包间</option>
+                        </select>
+                        <span style="font-size:12px;color:#999;">系统将按「匹配度+等待时长」智能排序推荐</span>
+                    </div>
+                    <div id="smartRecommendArea" class="table-container">
+                        <div style="padding:40px;text-align:center;color:#999;">请先在上方选择一个包间</div>
+                    </div>
                 </div>
             </section>
         </main>
