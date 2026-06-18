@@ -448,11 +448,76 @@ const Bills = {
 
 const Waiting = {
     getAll() {
-        return Storage.get(Storage.KEYS.WAITING, []);
+        let list = Storage.get(Storage.KEYS.WAITING, []);
+        list = this.migrateQueueNumbers(list);
+        return list;
     },
 
     getActive() {
         return this.getAll().filter(w => w.status === 'waiting');
+    },
+
+    migrateQueueNumbers(waitingList) {
+        let changed = false;
+        const hasMissing = waitingList.some(w => typeof w.globalQueueNumber !== 'number' || !w.globalQueueNumber);
+        if (!hasMissing) return waitingList;
+
+        const sorted = [...waitingList].sort((a, b) => {
+            const ta = new Date(a.createdAt || 0).getTime();
+            const tb = new Date(b.createdAt || 0).getTime();
+            return ta - tb;
+        });
+
+        let nextNum = 1;
+        const maxExisting = Math.max(0, ...waitingList
+            .filter(w => typeof w.globalQueueNumber === 'number' && w.globalQueueNumber > 0)
+            .map(w => w.globalQueueNumber));
+        nextNum = maxExisting > 0 ? maxExisting + 1 : 1;
+
+        for (const entry of sorted) {
+            if (typeof entry.globalQueueNumber !== 'number' || !entry.globalQueueNumber) {
+                entry.globalQueueNumber = nextNum++;
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            Storage.set(Storage.KEYS.WAITING, waitingList);
+        }
+        return waitingList;
+    },
+
+    reconcileRoomStates() {
+        const rooms = Rooms.getAll();
+        const waiting = this.getAll();
+        let roomsChanged = false;
+
+        for (const room of rooms) {
+            if (room.status === 'notified' && room.notifiedWaitingId) {
+                const w = waiting.find(x => x.id === room.notifiedWaitingId);
+                if (!w || w.status !== 'notified' || w.notifiedRoomId !== room.id) {
+                    delete room.notifiedWaitingId;
+                    room.status = 'available';
+                    roomsChanged = true;
+                }
+            }
+        }
+
+        for (const w of waiting) {
+            if (w.status === 'notified' && w.notifiedRoomId) {
+                const room = rooms.find(r => r.id === w.notifiedRoomId);
+                if (!room || room.status !== 'notified' || room.notifiedWaitingId !== w.id) {
+                    w.status = 'waiting';
+                    w.notifiedRoomId = null;
+                    w.notifiedAt = null;
+                }
+            }
+        }
+
+        if (roomsChanged) {
+            Storage.set(Storage.KEYS.ROOMS, rooms);
+        }
+        Storage.set(Storage.KEYS.WAITING, waiting);
     },
 
     getNextGlobalQueueNumber() {
@@ -484,12 +549,16 @@ const Waiting = {
         const waiting = this.getAll();
         const entry = waiting.find(w => w.id === id);
         if (entry) {
-            if ((entry.status === 'notified') && (status === 'waiting' || status === 'cancelled' || status === 'seated')) {
+            if (entry.status === 'notified' && status !== 'notified') {
                 if (entry.notifiedRoomId) {
                     Rooms.clearNotifiedWaiting(entry.notifiedRoomId);
                 }
             }
             entry.status = status;
+            if (status === 'waiting') {
+                entry.notifiedRoomId = null;
+                entry.notifiedAt = null;
+            }
             Storage.set(Storage.KEYS.WAITING, waiting);
         }
     },
@@ -543,30 +612,29 @@ const Waiting = {
         const waiting = this.getAll();
         const entry = waiting.find(w => w.id === waitingId);
         if (!entry) {
-            App.toast('候补记录不存在', 'error');
-            return null;
+            return { success: false, reason: '候补记录不存在' };
         }
         if (entry.status !== 'notified') {
-            App.toast('当前状态非已通知，无法入座', 'error');
-            return null;
+            return { success: false, reason: `当前状态为「${UI.getStatusLabel(entry.status)}」，无法直接入座` };
         }
         if (!entry.notifiedRoomId) {
-            App.toast('未关联包间信息', 'error');
-            return null;
+            return { success: false, reason: '该候补未关联包间信息' };
         }
 
         const room = Rooms.getById(entry.notifiedRoomId);
         if (!room) {
-            App.toast('关联包间不存在', 'error');
-            return null;
-        }
-        if (room.status !== 'notified' || room.notifiedWaitingId !== entry.id) {
-            App.toast(`包间「${room.name}」已被占用，请重新安排`, 'error');
             entry.status = 'waiting';
             entry.notifiedRoomId = null;
             entry.notifiedAt = null;
             Storage.set(Storage.KEYS.WAITING, waiting);
-            return null;
+            return { success: false, reason: '关联的包间已不存在，已自动退回等待队列' };
+        }
+        if (room.status !== 'notified' || room.notifiedWaitingId !== entry.id) {
+            entry.status = 'waiting';
+            entry.notifiedRoomId = null;
+            entry.notifiedAt = null;
+            Storage.set(Storage.KEYS.WAITING, waiting);
+            return { success: false, reason: `包间「${room.name}」当前状态为「${UI.getStatusLabel(room.status)}」，已被占用无法入座，已退回等待队列` };
         }
 
         const rooms = Rooms.getAll();
@@ -587,7 +655,7 @@ const Waiting = {
         entry.status = 'seated';
         Storage.set(Storage.KEYS.WAITING, waiting);
 
-        return order;
+        return { success: true, order };
     }
 };
 
@@ -640,6 +708,7 @@ const App = {
 
     init() {
         Storage.init();
+        Waiting.reconcileRoomStates();
         this.bindTabs();
         this.startClock();
         this.startAutoRefresh();
@@ -1683,13 +1752,14 @@ const App = {
     },
 
     acceptWaiting(waitingId) {
-        const order = Waiting.acceptWaiting(waitingId);
-        if (order) {
+        const result = Waiting.acceptWaiting(waitingId);
+        if (result.success) {
             this.toast('候补客人已入座，开始计时', 'success');
             this.closeModal();
             this.refreshAll();
         } else {
-            this.toast('操作失败', 'error');
+            this.toast(result.reason || '操作失败', 'error');
+            this.refreshAll();
         }
     }
 };
