@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>棋牌室包间计时管理系统</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <h1>棋牌室包间计时管理系统</h1>
+            <div class="header-actions">
+                <span id="currentTime" class="current-time"></span>
+                <button class="btn btn-primary" onclick="App.showCheckinModal()">+ 开台登记</button>
+            </div>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab-btn active" data-tab="dashboard">运营总览</button>
+            <button class="tab-btn" data-tab="rooms">包间管理</button>
+            <button class="tab-btn" data-tab="pricing">计费规则</button>
+            <button class="tab-btn" data-tab="bills">账单记录</button>
+            <button class="tab-btn" data-tab="waiting">候补队列</button>
+        </nav>
+
+        <main class="tab-content">
+            <section id="dashboard" class="tab-pane active">
+                <div class="dashboard-stats">
+                    <div class="stat-card">
+                        <div class="stat-label">使用中</div>
+                        <div class="stat-value" id="statUsing">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">空闲</div>
+                        <div class="stat-value" id="statAvailable">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">候补中</div>
+                        <div class="stat-value" id="statWaiting">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">今日营收</div>
+                        <div class="stat-value">¥<span id="statRevenue">0</span></div>
+                    </div>
+                </div>
+
+                <div class="rooms-grid" id="roomsGrid"></div>
+
+                <div class="section-title">
+                    <h3>进行中的订单</h3>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="activeOrdersTable">
+                        <thead>
+                            <tr>
+                                <th>包间</th>
+                                <th>客人</th>
+                                <th>开始时间</th>
+                                <th>已用时长</th>
+                                <th>当前费用</th>
+                                <th>加购</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="rooms" class="tab-pane">
+                <div class="section-header">
+                    <h2>包间资源管理</h2>
+                    <button class="btn btn-primary" onclick="App.showRoomModal()">+ 新增包间</button>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="roomsTable">
+                        <thead>
+                            <tr>
+                                <th>包间编号</th>
+                                <th>包间名称</th>
+                                <th>容纳人数</th>
+                                <th>基础设置</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="pricing" class="tab-pane">
+                <div class="section-header">
+                    <h2>计费规则配置</h2>
+                </div>
+
+                <div class="pricing-section">
+                    <div class="section-subtitle">
+                        <h3>时段费率表</h3>
+                        <button class="btn btn-primary btn-sm" onclick="App.showTimeSlotModal()">+ 新增时段</button>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table" id="timeSlotsTable">
+                            <thead>
+                                <tr>
+                                    <th>时段名称</th>
+                                    <th>开始时间</th>
+                                    <th>结束时间</th>
+                                    <th>费率类型</th>
+                                    <th>单价(元/小时)</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="pricing-section">
+                    <div class="section-subtitle">
+                        <h3>超时释放设置</h3>
+                    </div>
+                    <div class="config-form">
+                        <div class="form-group">
+                            <label>预订后多少分钟未到自动释放：</label>
+                            <input type="number" id="releaseMinutes" min="5" max="120" class="form-input">
+                            <span class="form-hint">分钟</span>
+                        </div>
+                        <button class="btn btn-primary" onclick="App.saveReleaseConfig()">保存设置</button>
+                    </div>
+                </div>
+
+                <div class="pricing-section">
+                    <div class="section-subtitle">
+                        <h3>茶水加购价目表</h3>
+                        <button class="btn btn-primary btn-sm" onclick="App.showAddonModal()">+ 新增项目</button>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table" id="addonsTable">
+                            <thead>
+                                <tr>
+                                    <th>项目名称</th>
+                                    <th>分类</th>
+                                    <th>单价(元)</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <section id="bills" class="tab-pane">
+                <div class="section-header">
+                    <h2>账单记录</h2>
+                    <div class="filter-group">
+                        <input type="date" id="billDateFilter" class="form-input">
+                        <button class="btn btn-secondary" onclick="App.filterBills()">筛选</button>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="billsTable">
+                        <thead>
+                            <tr>
+                                <th>账单号</th>
+                                <th>包间</th>
+                                <th>客人</th>
+                                <th>开始时间</th>
+                                <th>结束时间</th>
+                                <th>时长</th>
+                                <th>台费</th>
+                                <th>加购</th>
+                                <th>合计</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section id="waiting" class="tab-pane">
+                <div class="section-header">
+                    <h2>候补队列管理</h2>
+                    <button class="btn btn-primary" onclick="App.showWaitingModal()">+ 登记候补</button>
+                </div>
+                <div class="table-container">
+                    <table class="data-table" id="waitingTable">
+                        <thead>
+                            <tr>
+                                <th>排队号</th>
+                                <th>客人姓名</th>
+                                <th>联系电话</th>
+                                <th>人数</th>
+                                <th>期望包间</th>
+                                <th>登记时间</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div class="modal" id="modalContainer">
+        <div class="modal-overlay" onclick="App.closeModal()"></div>
+        <div class="modal-content" id="modalContent"></div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
