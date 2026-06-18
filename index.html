@@ -127,6 +127,11 @@
                             <input type="number" id="releaseMinutes" min="5" max="120" class="form-input">
                             <span class="form-hint">分钟</span>
                         </div>
+                        <div class="form-group">
+                            <label>候补通知后多少分钟未确认自动释放：</label>
+                            <input type="number" id="notifyTimeoutMinutes" min="5" max="60" class="form-input">
+                            <span class="form-hint">分钟</span>
+                        </div>
                         <button class="btn btn-primary" onclick="App.saveReleaseConfig()">保存设置</button>
                     </div>
                 </div>
@@ -184,7 +189,26 @@
             <section id="waiting" class="tab-pane">
                 <div class="section-header">
                     <h2>候补队列管理</h2>
-                    <button class="btn btn-primary" onclick="App.showWaitingModal()">+ 登记候补</button>
+                    <div class="filter-group">
+                        <button class="btn btn-primary" onclick="App.showWaitingModal()">+ 登记候补</button>
+                        <button class="btn btn-warning" onclick="App.showManualNotifyModal()">手动通知</button>
+                    </div>
+                </div>
+                <div class="waiting-filters">
+                    <select id="wfRoom" class="form-input" onchange="App.refreshWaitingTable()">
+                        <option value="">全部包间</option>
+                    </select>
+                    <select id="wfStatus" class="form-input" onchange="App.refreshWaitingTable()">
+                        <option value="">全部状态</option>
+                        <option value="waiting">等待中</option>
+                        <option value="notified">已通知</option>
+                        <option value="seated">已入座</option>
+                        <option value="cancelled">已取消</option>
+                    </select>
+                    <input type="number" id="wfPeopleMin" class="form-input" placeholder="最少人数" min="1" onchange="App.refreshWaitingTable()" style="width:100px;">
+                    <span style="color:#999;">~</span>
+                    <input type="number" id="wfPeopleMax" class="form-input" placeholder="最多人数" min="1" onchange="App.refreshWaitingTable()" style="width:100px;">
+                    <button class="btn btn-sm btn-secondary" onclick="App.resetWaitingFilters()">重置</button>
                 </div>
                 <div class="table-container">
                     <table class="data-table" id="waitingTable">
@@ -197,6 +221,7 @@
                                 <th>期望包间</th>
                                 <th>登记时间</th>
                                 <th>状态</th>
+                                <th>操作日志</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
