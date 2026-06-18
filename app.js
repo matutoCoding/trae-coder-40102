@@ -131,7 +131,7 @@ const Pricing = {
         for (const slot of slots) {
             const start = this.timeToMinutes(slot.startTime);
             let end = this.timeToMinutes(slot.endTime);
-            if (end === 0) end = 1440;
+            if (end === 0 || end === 1440) end = 1440;
             if (minutesOfDay >= start && minutesOfDay < end) {
                 return slot;
             }
@@ -159,7 +159,7 @@ const Pricing = {
 
             const slotStartMin = this.timeToMinutes(slot.startTime);
             let slotEndMin = this.timeToMinutes(slot.endTime);
-            if (slotEndMin === 0) slotEndMin = 1440;
+            if (slotEndMin === 0 || slotEndMin === 1440) slotEndMin = 1440;
 
             const segmentStartDate = new Date(current);
             segmentStartDate.setHours(0, 0, 0, 0);
@@ -212,7 +212,16 @@ const Rooms = {
         const rooms = this.getAll();
         if (room.id) {
             const idx = rooms.findIndex(r => r.id === room.id);
-            if (idx >= 0) rooms[idx] = room;
+            if (idx >= 0) {
+                const original = rooms[idx];
+                rooms[idx] = {
+                    ...original,
+                    code: room.code,
+                    name: room.name,
+                    capacity: room.capacity,
+                    amenities: room.amenities
+                };
+            }
         } else {
             room.id = 'r' + Date.now();
             room.status = 'available';
@@ -237,6 +246,16 @@ const Rooms = {
 
     getAvailable() {
         return this.getAll().filter(r => r.status === 'available');
+    },
+
+    clearNotifiedWaiting(id) {
+        const rooms = this.getAll();
+        const room = rooms.find(r => r.id === id);
+        if (room && room.status === 'notified') {
+            delete room.notifiedWaitingId;
+            room.status = 'available';
+            Storage.set(Storage.KEYS.ROOMS, rooms);
+        }
     }
 };
 
@@ -436,19 +455,25 @@ const Waiting = {
         return this.getAll().filter(w => w.status === 'waiting');
     },
 
+    getNextGlobalQueueNumber() {
+        const all = this.getAll();
+        if (all.length === 0) return 1;
+        return Math.max(...all.map(w => w.globalQueueNumber || 0)) + 1;
+    },
+
     add(data) {
         const waiting = this.getAll();
-        const activeCount = waiting.filter(w => w.status === 'waiting').length;
         const entry = {
             id: 'w' + Date.now(),
-            queueNumber: activeCount + 1,
+            globalQueueNumber: this.getNextGlobalQueueNumber(),
             customerName: data.customerName,
             phone: data.phone,
             peopleCount: data.peopleCount,
             preferredRoomId: data.preferredRoomId || null,
             createdAt: new Date().toISOString(),
             status: 'waiting',
-            notified: false
+            notifiedRoomId: null,
+            notifiedAt: null
         };
         waiting.push(entry);
         Storage.set(Storage.KEYS.WAITING, waiting);
@@ -459,43 +484,56 @@ const Waiting = {
         const waiting = this.getAll();
         const entry = waiting.find(w => w.id === id);
         if (entry) {
+            if ((entry.status === 'notified') && (status === 'waiting' || status === 'cancelled' || status === 'seated')) {
+                if (entry.notifiedRoomId) {
+                    Rooms.clearNotifiedWaiting(entry.notifiedRoomId);
+                }
+            }
             entry.status = status;
             Storage.set(Storage.KEYS.WAITING, waiting);
         }
     },
 
     remove(id) {
-        const waiting = this.getAll().filter(w => w.id !== id);
-        this.requeue(waiting);
-        Storage.set(Storage.KEYS.WAITING, waiting);
-    },
-
-    requeue(waitingList) {
-        let idx = 1;
-        for (const w of waitingList) {
-            if (w.status === 'waiting') {
-                w.queueNumber = idx++;
-            }
+        const waiting = this.getAll();
+        const entry = waiting.find(w => w.id === id);
+        if (entry && entry.status === 'notified' && entry.notifiedRoomId) {
+            Rooms.clearNotifiedWaiting(entry.notifiedRoomId);
         }
+        const remaining = waiting.filter(w => w.id !== id);
+        Storage.set(Storage.KEYS.WAITING, remaining);
     },
 
     tryFillRoom(roomId) {
         const room = Rooms.getById(roomId);
         if (!room) return null;
+        if (room.status !== 'available') return null;
 
         const waiting = this.getAll();
-        const match = waiting.find(w =>
-            w.status === 'waiting' &&
-            (!w.preferredRoomId || w.preferredRoomId === roomId) &&
-            w.peopleCount <= room.capacity
-        );
+        const sorted = waiting
+            .filter(w =>
+                w.status === 'waiting' &&
+                (!w.preferredRoomId || w.preferredRoomId === roomId) &&
+                w.peopleCount <= room.capacity
+            )
+            .sort((a, b) => a.globalQueueNumber - b.globalQueueNumber);
+        const match = sorted[0];
 
         if (match) {
             match.status = 'notified';
             match.notifiedRoomId = roomId;
             match.notifiedAt = new Date().toISOString();
+
+            const rooms = Rooms.getAll();
+            const roomToUpdate = rooms.find(r => r.id === roomId);
+            if (roomToUpdate) {
+                roomToUpdate.status = 'notified';
+                roomToUpdate.notifiedWaitingId = match.id;
+                Storage.set(Storage.KEYS.ROOMS, rooms);
+            }
+
             Storage.set(Storage.KEYS.WAITING, waiting);
-            App.toast(`候补通知：${match.customerName} (${match.phone}) 可入住 ${room.name}`, 'success');
+            App.toast(`候补通知：${match.customerName} (${match.phone}) 可入住 ${room.name}，已临时占位`, 'success');
             return match;
         }
         return null;
@@ -504,7 +542,39 @@ const Waiting = {
     acceptWaiting(waitingId) {
         const waiting = this.getAll();
         const entry = waiting.find(w => w.id === waitingId);
-        if (!entry || !entry.notifiedRoomId) return null;
+        if (!entry) {
+            App.toast('候补记录不存在', 'error');
+            return null;
+        }
+        if (entry.status !== 'notified') {
+            App.toast('当前状态非已通知，无法入座', 'error');
+            return null;
+        }
+        if (!entry.notifiedRoomId) {
+            App.toast('未关联包间信息', 'error');
+            return null;
+        }
+
+        const room = Rooms.getById(entry.notifiedRoomId);
+        if (!room) {
+            App.toast('关联包间不存在', 'error');
+            return null;
+        }
+        if (room.status !== 'notified' || room.notifiedWaitingId !== entry.id) {
+            App.toast(`包间「${room.name}」已被占用，请重新安排`, 'error');
+            entry.status = 'waiting';
+            entry.notifiedRoomId = null;
+            entry.notifiedAt = null;
+            Storage.set(Storage.KEYS.WAITING, waiting);
+            return null;
+        }
+
+        const rooms = Rooms.getAll();
+        const roomToUpdate = rooms.find(r => r.id === entry.notifiedRoomId);
+        if (roomToUpdate) {
+            delete roomToUpdate.notifiedWaitingId;
+            Storage.set(Storage.KEYS.ROOMS, rooms);
+        }
 
         const order = Orders.create({
             roomId: entry.notifiedRoomId,
@@ -552,10 +622,10 @@ const UI = {
             available: '空闲',
             occupied: '使用中',
             reserved: '已预订',
+            notified: '候补占位',
             active: '进行中',
             completed: '已完成',
             waiting: '等待中',
-            notified: '已通知',
             seated: '已入座',
             cancelled: '已取消'
         };
@@ -633,7 +703,7 @@ const App = {
 
     refreshDashboard() {
         const rooms = Rooms.getAll();
-        const using = rooms.filter(r => r.status === 'occupied').length;
+        const using = rooms.filter(r => r.status === 'occupied' || r.status === 'notified').length;
         const available = rooms.filter(r => r.status === 'available').length;
         const waiting = Waiting.getActive().length;
         const revenue = Bills.getTodayRevenue();
@@ -655,11 +725,18 @@ const App = {
         const grid = document.getElementById('roomsGrid');
         if (!grid) return;
         const rooms = Rooms.getAll();
+        const waitingList = Waiting.getAll();
 
         grid.innerHTML = rooms.map(room => {
             const order = Orders.getByRoomId(room.id);
             let info = '';
-            if (order) {
+            if (room.status === 'notified' && room.notifiedWaitingId) {
+                const waitingEntry = waitingList.find(w => w.id === room.notifiedWaitingId);
+                const notifiedLabel = waitingEntry
+                    ? `候补待入：${waitingEntry.customerName} (#${waitingEntry.globalQueueNumber})`
+                    : '候补占位中';
+                info = `<span style="color:#e65100;">${notifiedLabel}</span>`;
+            } else if (order) {
                 if (order.status === 'active') {
                     const now = new Date().getTime();
                     const start = new Date(order.startTime).getTime();
@@ -688,6 +765,13 @@ const App = {
 
         if (room.status === 'available') {
             this.showCheckinModal(roomId);
+        } else if (room.status === 'notified') {
+            const waitingList = Waiting.getAll();
+            const entry = waitingList.find(w => w.id === room.notifiedWaitingId);
+            if (entry) {
+                this.toast(`该包间已为「${entry.customerName}」候补占位，请到候补队列确认入座或取消`, 'warning');
+                this.switchTab('waiting');
+            }
         } else if (order && order.status === 'active') {
             this.showOrderDetailModal(order.id);
         } else if (order && order.status === 'reserved') {
@@ -857,7 +941,7 @@ const App = {
     refreshWaitingTable() {
         const tbody = document.querySelector('#waitingTable tbody');
         if (!tbody) return;
-        const waiting = Waiting.getAll().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+        const waiting = Waiting.getAll().sort((a, b) => a.globalQueueNumber - b.globalQueueNumber);
 
         if (waiting.length === 0) {
             tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无候补记录</td></tr>';
@@ -866,6 +950,7 @@ const App = {
 
         tbody.innerHTML = waiting.map(w => {
             const room = w.preferredRoomId ? Rooms.getById(w.preferredRoomId) : null;
+            const notifiedRoom = w.notifiedRoomId ? Rooms.getById(w.notifiedRoomId) : null;
             let actions = '';
             if (w.status === 'waiting') {
                 actions = `
@@ -877,15 +962,25 @@ const App = {
                     <button class="btn btn-sm btn-danger" onclick="App.removeWaiting('${w.id}')">放弃</button>
                 `;
             }
+            let statusClass = '';
+            if (w.status === 'waiting') statusClass = 'reserved';
+            else if (w.status === 'notified') statusClass = 'notified';
+            else if (w.status === 'seated') statusClass = 'available';
+            else statusClass = 'available';
+
+            let roomDisplay = room ? room.name : '任意';
+            if (notifiedRoom) {
+                roomDisplay = `<span style="color:#e65100;font-weight:600;">${notifiedRoom.name} (待确认)</span>`;
+            }
             return `
                 <tr>
-                    <td><strong>#${w.queueNumber}</strong></td>
+                    <td><strong>#${w.globalQueueNumber}</strong></td>
                     <td>${w.customerName}</td>
                     <td>${w.phone}</td>
                     <td>${w.peopleCount}人</td>
-                    <td>${room ? room.name : '任意'}</td>
+                    <td>${roomDisplay}</td>
                     <td>${UI.formatDateTime(w.createdAt)}</td>
-                    <td><span class="room-status ${w.status === 'waiting' ? 'reserved' : 'available'}">${UI.getStatusLabel(w.status)}</span></td>
+                    <td><span class="room-status ${statusClass}">${UI.getStatusLabel(w.status)}</span></td>
                     <td>${actions}</td>
                 </tr>
             `;
@@ -1040,7 +1135,7 @@ const App = {
         const room = Rooms.getById(id);
         if (!room) return;
         if (room.status !== 'available') {
-            this.toast('该包间正在使用中，无法删除', 'error');
+            this.toast('该包间正在使用/预订/候补中，无法删除', 'error');
             return;
         }
         if (!confirm(`确定删除包间「${room.name}」？`)) return;
@@ -1051,6 +1146,8 @@ const App = {
 
     showTimeSlotModal(slotId) {
         const slot = slotId ? Pricing.getTimeSlots().find(s => s.id === slotId) : null;
+        const isMidnight = slot && (slot.endTime === '24:00' || slot.endTime === '00:00' && slot.startTime !== '00:00');
+        const displayEndTime = isMidnight ? '23:59' : (slot?.endTime || '00:00');
         this.openModal(`
             <div class="modal-header">
                 <h3>${slot ? '编辑时段' : '新增时段'}</h3>
@@ -1067,7 +1164,11 @@ const App = {
                 </div>
                 <div class="form-row">
                     <label>结束时间 *</label>
-                    <input type="time" id="tsEnd" class="form-input" value="${slot?.endTime || '00:00'}">
+                    <input type="time" id="tsEnd" class="form-input" value="${displayEndTime}">
+                    <label style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:13px;color:#555;">
+                        <input type="checkbox" id="tsEndMidnight" ${isMidnight ? 'checked' : ''} onchange="App.toggleEndTimeInput()">
+                        到当日 24:00（即 00:00 截止，跨整天最后一分钟）
+                    </label>
                 </div>
                 <div class="form-row">
                     <label>费率类型 *</label>
@@ -1090,11 +1191,26 @@ const App = {
         `);
     },
 
+    toggleEndTimeInput() {
+        const cb = document.getElementById('tsEndMidnight');
+        const endInput = document.getElementById('tsEnd');
+        if (cb && endInput) {
+            endInput.disabled = cb.checked;
+            if (cb.checked) {
+                endInput.value = '23:59';
+                endInput.style.opacity = '0.5';
+            } else {
+                endInput.style.opacity = '1';
+            }
+        }
+    },
+
     submitTimeSlot() {
         const id = document.getElementById('tsId').value;
         const name = document.getElementById('tsName').value.trim();
         const startTime = document.getElementById('tsStart').value;
-        const endTime = document.getElementById('tsEnd').value;
+        const endMidnightChecked = document.getElementById('tsEndMidnight')?.checked;
+        let endTime = endMidnightChecked ? '24:00' : document.getElementById('tsEnd').value;
         const type = document.getElementById('tsType').value;
         const price = parseFloat(document.getElementById('tsPrice').value);
 
@@ -1554,7 +1670,7 @@ const App = {
         }
 
         const entry = Waiting.add({ customerName: name, phone, peopleCount: people, preferredRoomId: preferredRoomId || null });
-        this.toast(`候补登记成功，排队号 #${entry.queueNumber}`, 'success');
+        this.toast(`候补登记成功，排队号 #${entry.globalQueueNumber}`, 'success');
         this.closeModal();
         this.refreshAll();
     },

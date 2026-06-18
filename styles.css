@@ -163,6 +163,10 @@ body {
     border-left-color: #ff9800;
 }
 
+.room-card.notified {
+    border-left-color: #9c27b0;
+}
+
 .room-number {
     font-size: 18px;
     font-weight: 700;
@@ -196,6 +200,16 @@ body {
 .room-status.reserved {
     background: #fff3e0;
     color: #ff9800;
+}
+
+.room-status.notified {
+    background: #f3e5f5;
+    color: #9c27b0;
+}
+
+.room-status.seated {
+    background: #e8f5e9;
+    color: #4caf50;
 }
 
 .room-info {
